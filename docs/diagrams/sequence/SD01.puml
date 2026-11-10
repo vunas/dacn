@@ -1,0 +1,62 @@
+@startuml
+autonumber
+skinparam monochrome true
+skinparam defaultFontName Arial
+
+title Hỏi đáp RAG và Kiểm định nguồn (SD01)
+
+actor "Khách hàng / Widget" as Customer
+participant "WidgetController" as Ctrl
+participant "MessageService" as MsgSvc
+participant "RAGService" as RAG
+participant "Qdrant\n(Vector Store)" as Vec
+participant "Local API\nOllama" as LLM
+participant "SQLite\n(Relational DB)" as DB
+
+Customer -> Ctrl: POST /api/v1/widget/messages (content, client_message_id)
+Ctrl -> MsgSvc: process_message()
+
+group Lưu tin khách trước khi gọi AI (Chống mất dữ liệu)
+    MsgSvc -> DB: Kiểm tra UUID & INSERT Message (sender_type='customer')
+    DB --> MsgSvc: COMMIT
+end
+@enduml
+
+group Truy xuất Vector & Sinh câu trả lời có kiểm định
+    MsgSvc -> RAG: answer_question(query, history)
+    alt Câu hỏi thiếu chủ thể hoặc điều kiện áp dụng
+        RAG --> MsgSvc: Trả lời hỏi rõ (needs_clarification=true)
+    else Câu hỏi đủ điều kiện truy hồi
+        RAG -> Vec: Embedding câu hỏi & Truy xuất Qdrant (ngưỡng score >= 0.35)
+        Vec --> RAG: Trả ứng viên (chunk_id, document_id, index_version, content, score)
+        alt Không tìm thấy đoạn nào đạt ngưỡng
+            RAG --> MsgSvc: Từ chối trả lời (Không đủ bằng chứng trong kho tri thức)
+        else Có đoạn ứng viên đạt yêu cầu
+            RAG -> LLM: Chọn bằng chứng và sinh đáp án theo JSON Schema
+            LLM --> RAG: Trả về ID câu nguồn đã chọn
+            RAG -> RAG: Backend kiểm định ID, quote và dữ kiện
+            alt Nguồn mâu thuẫn hoặc không hỗ trợ đủ claim
+                RAG --> MsgSvc: Từ chối trả lời (CONFLICT/ABSTENTION)
+            else Nguồn nhất quán và hỗ trợ đầy đủ
+                RAG --> MsgSvc: Đáp án grounded kèm citation snapshot
+            end
+        end
+    end
+end
+
+group Kiểm tra trạng thái lại trước khi lưu đáp án
+    MsgSvc -> DB: Đọc lại status hội thoại, tin nhắn cuối & index_version tài liệu
+    alt Hội thoại vẫn OPEN và nguồn chưa bị xóa/thay đổi
+        MsgSvc -> DB: INSERT Message (sender_type='ai', citations)
+        DB --> MsgSvc: COMMIT
+        MsgSvc --> Ctrl: Trả về Snapshot hội thoại kèm tin AI & Dẫn nguồn
+        Ctrl --> Customer: HTTP 200 OK (Đáp án + Citations)
+    else Hội thoại đã HANDOFF sang nhân viên / Nguồn tài liệu đã đổi
+        MsgSvc -> MsgSvc: Bỏ đáp án AI cũ, giữ nguyên lịch sử hiện tại
+        MsgSvc --> Ctrl: Trả về trạng thái chờ nhân viên / bỏ qua AI
+        Ctrl --> Customer: HTTP 200 OK (Không kèm tin AI cũ)
+    else Lỗi Provider Ollama / Timeout
+        MsgSvc --> Ctrl: Trả về ai_error=true (Giữ nguyên tin khách đã lưu)
+        Ctrl --> Customer: HTTP 200 OK (ai_error: true)
+    end
+end

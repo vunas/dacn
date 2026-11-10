@@ -1,0 +1,389 @@
+# Thiết kế hệ thống hỗ trợ khách hàng
+
+Tra cứu sơ đồ theo loại tại [docs/diagrams](diagrams/README.md): BFD, BPMN, Use Case, Sequence, ERD, kiến trúc, trạng thái, luồng nghiệp vụ và UI Mockup. Thư mục giữ bản sao để đọc; nguồn chính và cách cập nhật được ghi trong danh mục.
+
+Ngày đối chiếu: 21/09/2026. Tài liệu mô tả chức năng đang có trên FastAPI/SQLite, React/Vite, Qdrant embedded và Ollama local. Đây là hồ sơ kỹ thuật để người dùng/GVHD duyệt sau; chưa phải xác nhận nghiệm thu. M3 còn chờ người duyệt chất lượng, M4 mới kiểm chứng chức năng local. API chi tiết tại [API.md](API.md), bằng chứng tại [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
+
+Bổ sung ngày 15/10/2026: [hồ sơ tuần 04](week04/README.md) và Chương 3–4 của [báo cáo](report/BaoCao.md) có hiện trạng giả lập được người dùng cho phép, nguồn tham khảo công khai, 14 FR, 10 NFR, 12 quy tắc nghiệp vụ, BFD cập nhật và bốn file BPMN 2.0 có DI. Bộ BPMN có pool/lane, message flow, nhánh điều kiện và lỗi dịch vụ; là mô hình phân tích không thực thi, không thay nghiệm thu. Các Mermaid và ERD bên dưới giữ mốc đối chiếu kỹ thuật cũ; dùng bộ tuần 04 cho phần nghiệp vụ hiện tại.
+
+[Hồ sơ tuần 05](week05/README.md) bổ sung vào báo cáo tại mục 3.10–3.12 và 4.6: 20 Use Case thuộc sáu mô đun, 10 đặc tả, bảy hình Use Case và năm Sequence có phân tầng, transaction, nhánh lỗi và kiểm soát đồng thời. Mô hình đối chiếu triển khai một worker, SQLite, Qdrant embedded, Ollama và Telegram polling; các SQL nghiệp vụ còn nằm trong Controller được ghi rõ. Ngày 15/10/2026, bộ này từng được đưa chi tiết vào đề cương. Ngày 16/10/2026, đề cương được rút về mục tiêu, phương pháp, kế hoạch và dàn ý bảy chương; mô hình chi tiết tiếp tục được lưu trong báo cáo và hồ sơ tuần 04–05, không thay nghiệm thu chức năng.
+
+## Phân rã chức năng BFD
+
+```mermaid
+flowchart TD
+    S[Hỗ trợ khách hàng] --> A[Quản lý truy cập]
+    S --> K[Kho tri thức]
+    S --> C[Hội thoại]
+    S --> T[Xử lý yêu cầu]
+    S --> E[Đánh giá RAG]
+    S --> W[Quản lý và báo cáo]
+    W --> W1[Tổng quan và phân tích SLA]
+    W --> W2[Hồ sơ khách và đơn nội bộ]
+    W --> W3[Cài đặt và đổi mật khẩu]
+    A --> A1[Cấp tài khoản và đăng nhập nhân viên]
+    A --> A2[Tạo và thu hồi phiên khách]
+    K --> K1[Tải tài liệu và lập chỉ mục]
+    K --> K2[Xem nguồn, lập chỉ mục lại, xóa]
+    C --> C1[Lưu tin, truy xuất và trả lời có nguồn]
+    C --> C2[Tra cứu đơn theo khách trong hệ thống]
+    C --> C3[Khôi phục lịch sử và polling]
+    T --> T1[Chuyển hàng chờ và tiếp nhận]
+    T --> T2[Trả lời, giải quyết và đóng]
+    T --> T3[SLA phản hồi đầu và tiếp nhận lại]
+    E --> E1[Đo dev và regression]
+    E --> E2[Tổng hợp phiếu người duyệt]
+```
+
+M5 đã bổ sung model chọn công cụ đơn hàng bằng JSON Schema, backend xác thực và điều phối. Telegram đã có adapter polling và kiểm thử local, chờ bot thật để nghiệm thu. Agent nhiều bước, push realtime, OCR và SLA giải quyết vẫn thuộc phạm vi dự kiến.
+
+## Luồng nghiệp vụ mức 0
+
+Sơ đồ phân làn dưới đây diễn tả nhiệm vụ, điều kiện rẽ nhánh và trao đổi giữa khách, hệ thống, nhân viên. Đây là biểu diễn Mermaid tại mốc cũ, không phải BPMN. Bộ BPMN 2.0 có thể chỉnh sửa đã bổ sung tại [week04/diagrams](week04/README.md#sử-dụng-bộ-hồ-sơ), process đặt isExecutable=false.
+
+```mermaid
+flowchart TD
+    subgraph KH[Khách hàng]
+        Start([Bắt đầu]) --> Session[Tạo hoặc khôi phục phiên]
+        Send[Gửi yêu cầu]
+        Read[Đọc phản hồi và nguồn]
+        More{Cần hỗ trợ thêm?}
+        EndSession[Kết thúc phiên]
+    end
+    subgraph HT[Hệ thống]
+        Valid{Phiên và dữ liệu hợp lệ?}
+        Error[Báo lỗi và giữ bản nháp tại trang]
+        Save[Lưu tin khách, kiểm tra UUID]
+        Route{Trạng thái và yêu cầu}
+        Rag[Truy xuất, chọn câu và kiểm định]
+        Guard{Trạng thái, tin cuối, nguồn còn đúng?}
+        Answer[Trả lời có nguồn hoặc từ chối]
+        Queue[Tạo ticket và đưa vào hàng chờ]
+        Keep[Lưu tin, không gọi AI]
+        Close[Đóng ticket hoạt động và thu hồi phiên]
+    end
+    subgraph NV[Nhân viên]
+        Accept[Tiếp nhận độc quyền]
+        Reply[Đọc và trả lời]
+        Finish{Kết quả xử lý}
+        Resolve[Giải quyết với ghi chú nội bộ]
+        Closed[Đóng với ghi chú nội bộ]
+    end
+    Session --> Send --> Valid
+    Valid -->|Không| Error --> Send
+    Valid -->|Có| Save --> Route
+    Route -->|Đang mở, hỏi chính sách| Rag --> Guard
+    Guard -->|Có| Answer --> Read
+    Guard -->|Không| Keep
+    Route -->|Yêu cầu người thật hoặc nhắn sau giải quyết| Queue
+    Route -->|Đang chờ hoặc đã tiếp nhận| Keep
+    Route -->|Đã đóng| Error
+    Queue --> Accept --> Reply --> Finish
+    Keep --> Reply
+    Reply --> Read --> More
+    More -->|Có| Send
+    More -->|Không| EndSession --> Close
+    Finish -->|Đã xử lý| Resolve --> More
+    Finish -->|Kết thúc hội thoại| Closed --> EndSession
+```
+
+Khi hội thoại còn mở và có đúng một mã đơn, model chọn lookup_order, handoff hoặc rag theo schema giới hạn. Không có mã đơn đi RAG như trước; nhiều mã thì yêu cầu chọn một mã, không tự chọn đơn. Backend kiểm tra lựa chọn rồi khóa lại hội thoại, xác nhận trạng thái/tin khách cuối và tra cứu theo customer_id trong DB. Không tìm thấy đơn thuộc khách sẽ chuyển nhân viên. Phiên widget tự tạo khách mới, nên tên giống người mua không cấp quyền đơn có sẵn. Handoff theo từ khóa vẫn ưu tiên trước model; tóm tắt ticket là trích tối đa tám tin gần nhất, không phải tóm tắt bằng LLM.
+
+## Use Case và quyền
+
+| ID   | Tác nhân        | Mục tiêu                          | Điều kiện và kết quả                                                        |
+| ---- | --------------- | --------------------------------- | --------------------------------------------------------------------------- |
+| UC01 | Admin           | Cấp tài khoản                     | Đã đăng nhập; username duy nhất, mật khẩu ít nhất 12 ký tự                  |
+| UC02 | Admin, agent    | Đăng nhập, đăng xuất              | Tài khoản hoạt động; phiên nhân viên tối đa 8 giờ                           |
+| UC03 | Khách           | Bắt đầu, khôi phục, kết thúc chat | Phiên khách tối đa 24 giờ, chỉ một hội thoại; không xác minh chủ đơn        |
+| UC04 | Khách           | Hỏi chính sách có nguồn           | Hội thoại open; tin lưu trước model; thiếu bằng chứng trả từ chối           |
+| UC05 | Admin           | Quản lý tài liệu                  | Tải/lập chỉ mục lại/xóa; staff được xem tài liệu, đoạn nguồn và hỏi thử     |
+| UC06 | Khách, staff    | Chuyển nhân viên                  | Ticket hoạt động được tái sử dụng; AI ngừng trả lời                         |
+| UC07 | Admin, agent    | Tiếp nhận                         | Hội thoại đang chờ, chưa có người phụ trách; tranh chấp chỉ một người thắng |
+| UC08 | Người phụ trách | Trả lời                           | Hội thoại assigned và assigned_agent_id khớp người đăng nhập                |
+| UC09 | Người phụ trách | Giải quyết hoặc đóng              | Ghi chú bắt buộc, tin khách cuối không đổi; chốt SLA và ghi người/thời điểm |
+| UC10 | Khách           | Nhắn sau giải quyết               | Giữ lịch sử, tạo ticket mới, bỏ phân công cũ và chờ tiếp nhận lại           |
+| UC11 | Admin, agent    | Xem Inbox và SLA                  | Thấy tất cả hội thoại nội bộ; chưa có tenant/team isolation                 |
+| UC12 | Người duyệt     | Chấm chất lượng                   | Điền bản sao phiếu; CLI chỉ tính nhãn đã duyệt và câu thực chấm             |
+
+UC09 dùng kết quả UC07; UC10 phát sinh UC06 mới và không bật lại UC04. Admin có quyền quản lý nhưng UC08/UC09 vẫn yêu cầu phụ trách. Khách không được gọi API nội bộ, không xem ghi chú ticket hoặc retrieval thô. Giao diện dùng luồng trên, backend kiểm tra quyền độc lập.
+
+## Kiến trúc triển khai local
+
+```mermaid
+flowchart LR
+    W[Widget iframe và trang chat] --> F[Origin frontend và proxy API]
+    I[Inbox và Kho tri thức] --> F
+    F --> A[FastAPI một worker]
+    TG[Telegram Bot API] <--> P[Polling một luồng, opt-in]
+    P --> A
+    A --> S[(SQLite)]
+    A --> D[File tài liệu]
+    A --> Q[(Qdrant embedded)]
+    A --> O[Ollama local]
+    O --> L[qwen3:4b]
+    O --> E[embeddinggemma:300m]
+```
+
+Frontend cần SPA fallback cho /chat và proxy /api cùng origin. Bản Vite build có thể được FastAPI phục vụ cùng origin khi SERVE_FRONTEND=true; mặc định tắt để giữ chế độ Vite dev. Chỉ mount assets và các trang công khai đã định nghĩa, không fallback URL API lạ về HTML. Endpoint /api/v1/ready có quyền Staff kiểm tra schema, nguồn/vector và tên model Ollama; chưa kiểm tra sinh đáp án thật. Cookie SameSite Strict/HttpOnly tách khách và nhân viên, bật Secure ngoài development. Không giữ SQL transaction trong lúc gọi Ollama. Qdrant và giới hạn trong bộ nhớ hiện chỉ hỗ trợ một API worker. Triển khai cloud, sao lưu/khôi phục, tải đồng thời và HTTPS thực tế chưa được nghiệm thu.
+
+## ERD
+
+```mermaid
+erDiagram
+    users ||--o{ auth_sessions : owns
+    users o|--o{ conversations : assigned
+    users o|--o{ messages : sends
+    users o|--o{ tickets : completes
+    customers ||--o{ conversations : starts
+    customers ||--o{ orders : owns
+    orders ||--o| order_access : grants
+    users ||--o{ order_access : issues
+    customers ||--o{ order_access : scoped_owner
+    conversations o|--o{ order_access : redeems
+    conversations ||--o| widget_sessions : has
+    conversations ||--o{ messages : contains
+    conversations ||--o{ tickets : tracks
+    knowledge_documents ||--o{ document_chunks : contains
+    customers ||--o| telegram_peers : identifies
+    conversations o|--o{ telegram_peers : current_chat
+    telegram_peers ||--o{ telegram_updates : receives
+    conversations o|--o{ telegram_updates : processes
+    messages ||--o| telegram_deliveries : delivers
+    telegram_cursors {
+        string bot_id PK
+        bigint next_update_id
+    }
+    telegram_peers {
+        string id PK
+        string bot_id
+        string chat_id
+        string customer_id FK,UK
+        string conversation_id FK
+    }
+    telegram_updates {
+        string id PK
+        string bot_id
+        bigint update_id
+        string peer_id FK
+        string conversation_id FK
+        text content
+        string state
+    }
+    telegram_deliveries {
+        string message_id PK,FK
+        string state
+        string error
+        string external_message_id
+        datetime sent_at
+    }
+    users {
+        string id PK
+        string username UK
+        string role
+        boolean active
+        string password_hash
+    }
+    auth_sessions {
+        string token_hash PK
+        string user_id FK
+        int expires_at
+    }
+    customers {
+        string id PK
+        string display_name
+        string email
+    }
+    conversations {
+        string id PK
+        string customer_id FK
+        string assigned_agent_id FK
+        string last_customer_message_id FK
+        string channel
+        string status
+        string priority
+        datetime created_at
+    }
+    widget_sessions {
+        string token_hash PK
+        string conversation_id FK,UK
+        int expires_at
+    }
+    messages {
+        string id PK
+        string conversation_id FK
+        string agent_id FK
+        string sender_type
+        string external_message_id
+        string reply_to_id
+        text content
+        json citations
+        json tool_trace
+        datetime created_at
+    }
+    tickets {
+        string id PK
+        string conversation_id FK
+        string status
+        string priority
+        text summary
+        datetime created_at
+        datetime completed_at
+        string completed_by_id FK
+        text completion_note
+        datetime first_response_at
+    }
+    order_access {
+        string order_id PK,FK
+        string customer_id FK
+        string token_hash UK
+        string issued_by_id FK
+        int expires_at
+        string conversation_id FK
+    }
+    orders {
+        string id PK
+        string customer_id FK
+        string status
+        string tracking_code
+    }
+    knowledge_documents {
+        string id PK
+        string filename
+        string status
+        string file_hash UK
+        string index_version
+        string embedding_model
+        text error_message
+        datetime created_at
+    }
+    document_chunks {
+        string id PK
+        string document_id FK
+        int chunk_index
+        text content
+        string source
+        int page
+        string location
+    }
+```
+
+ERD phản ánh đầy đủ mô hình quan hệ thực thể khai báo trong SQLAlchemy và hệ thống migration v1–v11. Cơ sở dữ liệu cưỡng chế toàn vẹn toàn bộ mối quan hệ khóa ngoại (kích hoạt `PRAGMA foreign_keys=ON` trên mọi kết nối), bao gồm ràng buộc từ `conversations.last_customer_message_id` tới `messages.id`. Miền giá trị cho các trường trạng thái và độ ưu tiên (`status`, `state`, `priority`) được bảo đảm bằng `CheckConstraint` và Trigger CSDL.
+
+Khả năng chống trùng lặp tin nhắn ngoài (`external_message_id`) dựa trên khóa ghi hội thoại và truy vấn tra cứu UUID theo phiên làm việc. Mối liên kết giữa dữ liệu quan hệ (SQLite) và dữ liệu mảng vector (Qdrant) thực hiện qua cơ chế tham chiếu metadata tầng ứng dụng (`document_id`, `chunk_id`, `index_version`), không tồn tại khóa ngoại liên kho.
+
+Citation là snapshot JSON trong Message, không có FK tới chunk; quote lịch sử được giữ khi tài liệu bị xóa, mở nguồn có thể trả 404/409. Hash file có unique index; vector dùng ID chunk và phiên bản chỉ mục để đối chiếu với SQL. Không đồng nhất file, chunk và lịch sử hội thoại thành một nguồn dữ liệu.
+
+### Từ điển dữ liệu RAG
+
+| Thành phần | Trường chính | Ý nghĩa và ràng buộc |
+|---|---|---|
+| `knowledge_documents` | `id`, `filename`, `status`, `file_hash`, `index_version`, `embedding_model` | Nguồn tài liệu trong SQLite. `status` chỉ nhận `uploaded`, `processing`, `indexed`, `failed` hoặc `deleting`; `file_hash` dùng phát hiện bản trùng; chỉ tài liệu `indexed` và đúng `embedding_model` được truy hồi. |
+| `document_chunks` | `id`, `document_id`, `chunk_index`, `content`, `source`, `page`, `location` | Các đoạn văn bản đã tách, có FK tới `knowledge_documents.id`; `chunk_index` giữ thứ tự; `page` và `location` có thể rỗng tùy định dạng file. |
+| Qdrant point ID | `uuid5(NAMESPACE_URL, chunk_id)` | Định danh ổn định của điểm vector, suy ra từ `chunk_id`; không phải khóa ngoại SQL. |
+| Qdrant vector | vector cosine, kích thước do Ollama trả về cho `embedding_model` | Embedding được tạo theo batch tối đa 16 chunk. Kích thước vector được lấy từ batch đầu tiên khi tạo collection, không hard-code trong schema SQL. |
+| Qdrant payload | `chunk_id`, `document_id`, `index_version`, `content`, `source`, `page`, `location` | Bản sao phục vụ truy hồi và hiển thị nguồn. Backend lọc theo `index_version` đang hiệu lực rồi kiểm tra lại trạng thái/version trong SQLite trước khi lưu đáp án. |
+| Message citation | `document_id`, `chunk_id`, `index_version`, `source`, `score`, `page`, `location` | Snapshot nguồn tại thời điểm trả lời; không tạo FK tới chunk để vẫn giữ lịch sử khi tài liệu bị xóa hoặc lập chỉ mục lại. |
+
+
+## Cơ chế lưu trữ và Phân tách trách nhiệm giữa SQLite và Qdrant
+
+1. **Phân định ranh giới lưu trữ:**
+   - **SQLite (CSDL Quan hệ):** Chịu trách nhiệm quản lý cấu trúc dữ liệu nghiệp vụ có tính toàn vẹn cao (ACID), bao gồm: tài khoản, hồ sơ khách hàng, đơn hàng, hội thoại, tin nhắn, ticket SLA, và metadata tài liệu (`Document`, `DocumentChunk`).
+   - **Qdrant (Embedded Vector Database):** Chịu trách nhiệm lưu trữ các điểm vector mảng số thực từ mô hình `embeddinggemma:300m` phục vụ tìm kiếm tương đồng ngữ nghĩa (Cosine Similarity Search). Kích thước vector do Ollama trả về và được dùng khi tạo collection; Qdrant **không phải là bảng SQL** và không quản lý quan hệ bảng.
+
+2. **Cơ chế liên kết liên kho (Application-level Referencing):**
+   - **Khẳng định không có Khóa ngoại (Foreign Key) xuyên kho:** Giữa SQLite và Qdrant tuyệt đối không tồn tại ràng buộc khóa ngoại tầng CSDL.
+   - **Mã tham chiếu tầng ứng dụng:** Mỗi điểm Vector trong Qdrant lưu trữ payload gồm `document_id`, `chunk_id`, `index_version`, `content`, `source`, `page` và `location`. Đồng bộ dữ liệu giữa hai kho do backend (`DocumentService`) điều phối thông qua `document_lock`.
+
+3. **Vòng đời dữ liệu Vector (Reindex / Delete / Retrieval):**
+   - **Truy hồi (Retrieval):** Khi tìm kiếm, Qdrant thực hiện Cosine Search và lọc (`filter`) theo cờ `index_version` đang có hiệu lực. Backend nhận danh sách `sentence_id` ứng viên có `score >= 0.35` để gửi sang LLM.
+   - **Lập chỉ mục lại (Reindex):** Khi admin yêu cầu reindex, hệ thống sinh một `index_version` mới, ghi các vector mới vào Qdrant, sau đó cập nhật `index_version` trong SQLite. Các vector mang phiên bản cũ sẽ bị loại bỏ khỏi luồng truy xuất.
+   - **Xóa tài liệu (Delete):** Khi xóa nguồn, backend cập nhật trạng thái `Document.status = 'deleting'` trong SQLite để chặn truy hồi ngay lập tức, sau đó thực hiện lệnh xóa các điểm vector tương ứng trong Qdrant bằng truy vấn Payload Filter `source_id`.
+
+## Trạng thái hội thoại
+
+```mermaid
+stateDiagram-v2
+    [*] --> open: Tạo hội thoại
+    open --> open: Hỏi đáp hoặc tra đơn
+    open --> handoff_requested: Yêu cầu nhân viên
+    handoff_requested --> assigned: Tiếp nhận thành công
+    assigned --> resolved: Người phụ trách giải quyết
+    assigned --> closed: Người phụ trách đóng
+    resolved --> handoff_requested: Tin khách mới tạo lượt hỗ trợ
+    open --> closed: Khách kết thúc phiên
+    handoff_requested --> closed: Khách kết thúc phiên
+    assigned --> closed: Khách kết thúc phiên
+    resolved --> closed: Khách kết thúc phiên
+    closed --> [*]: Chỉ xem lịch sử hoặc bắt đầu phiên mới
+```
+
+Ticket hoạt động đi từ open sang assigned rồi resolved/closed. Khách kết thúc trước tiếp nhận có thể chuyển trực tiếp open sang closed. Lượt sau tạo ticket mới, không đổi trạng thái ticket cũ. Resolved giữ thông tin phân công cho tới khi tin khách mới bỏ phân công; closed không mở lại. Retry tin cũ sau resolved không làm phát sinh chuyển trạng thái.
+
+## Sequence Diagram chi tiết
+
+### 1. Luồng Nạp tài liệu vào Kho tri thức (SD05)
+
+![Sequence Nạp tài liệu](diagrams/sequence/SD05.png)
+
+- **Xử lý chính:** `DocumentService` nhận file, kiểm tra định dạng/dung lượng (<=10MB) và mã SHA-256[cite: 15]. Nếu hợp lệ, tạo bản ghi `Document` trong SQLite với trạng thái `processing`[cite: 15].
+- **Chia đoạn & Tạo Vector:** File được phân tách thành các `DocumentChunk`[cite: 15]. Hệ thống gọi `embeddinggemma` qua Ollama theo từng batch (tối đa 16 chunks) để lấy vector Float 300D và đẩy vào `Qdrant Vector Store`[cite: 15].
+- **Xử lý lỗi:** Khi hoàn tất toàn bộ lô, trạng thái chuyển thành `indexed`[cite: 15]. Nếu xảy ra lỗi trích xuất hoặc ngắt kết nối Ollama/Qdrant, hệ thống cập nhật `failed`, giữ nguyên file đầu vào và trả lỗi HTTP 503/500[cite: 15].
+
+### 2. Luồng Hỏi đáp RAG và Kiểm định nguồn (SD01)
+
+![Sequence Hỏi đáp RAG](diagrams/sequence/SD01.png)
+
+- **Bảo toàn dữ liệu:** `MessageService` lưu tin nhắn khách vào SQLite trước khi gọi AI.
+- **Lọc ngưỡng & Kiểm định:** `RAGService` truy xuất Qdrant với ngưỡng `score >= 0.35`. Nếu không đạt ngưỡng, hệ thống chủ động từ chối trả lời. Nếu có nguồn, Ollama (`qwen3:4b`) sinh đáp án với ràng buộc JSON Schema.
+- **Chống race-condition AI muộn:** Trước khi ghi câu trả lời AI vào CSDL, hệ thống kiểm tra lại trạng thái hội thoại. Nếu khách đã `handoff` sang nhân viên trong lúc AI đang chạy, đáp án AI bị loại bỏ. Nếu Ollama timeout, trả về `ai_error=true` và giữ nguyên tin khách.
+
+## Sequence hoàn tất và tiếp nhận lại
+
+```mermaid
+sequenceDiagram
+    participant N as Nhân viên
+    participant A as API
+    participant D as SQLite
+    participant K as Khách
+    N->>A: finish với ticket và tin khách cuối đã xem
+    A->>D: Khóa hội thoại
+    alt Cùng ticket, người, trạng thái và ghi chú đã hoàn tất
+        A-->>N: 200 duplicate, không ghi thêm
+    else Chưa hoàn tất
+        A->>D: Kiểm tra phụ trách và tin khách cuối
+        alt Có tin mới hoặc sai người phụ trách
+            A-->>N: 409, đọc lại trước khi hoàn tất
+        else Hợp lệ
+            A->>D: Chốt phản hồi, lưu kết quả và ghi chú nội bộ
+            A->>D: Đổi trạng thái, thêm thông báo chung, commit
+            A-->>N: 200
+        end
+    end
+    K->>A: Tin mới sau resolved
+    A->>D: Khóa, lưu tin, tạo ticket, bỏ phân công, commit
+    A-->>K: handoff_requested, AI vẫn dừng
+    N->>A: Tiếp nhận lượt mới
+    A->>D: UPDATE có điều kiện, chỉ một người thắng
+```
+
+Tin mới thắng khóa trước finish khiến finish bị 409; finish resolved thắng trước khiến tin mới vào lượt mới. Ghi chú không được đưa vào thông báo công khai. Ticket kết thúc chốt first_response_at, kể cả null; phản hồi lượt sau không biến cancelled thành met. Hạn phản hồi cố định urgent/high/normal/low là 5/15/60/240 phút, 24/7 từ tạo ticket, chưa lưu phiên bản chính sách/deadline.
+
+## Giao diện và phần còn thiếu
+
+Màn hình hiện có gồm đăng nhập, Inbox ba vùng, Kho tri thức, trang chat và widget iframe. Inbox polling mỗi ba giây khi hiển thị, giữ bản nháp/lựa chọn, dừng khi tab ẩn hoặc thao tác ghi. Form hoàn tất chỉ hiện cho người phụ trách có ticket hoạt động; xác nhận giải thích hành vi nhắn tiếp. Widget sau resolved cho gửi, sau closed khóa composer và hướng dẫn bắt đầu phiên mới.
+
+QA giao diện ngày 14/09 đã kiểm tra desktop/mobile 390px; các ảnh trong data/runtime là bằng chứng local, không thuộc gói nguồn bắt buộc. Các mockup do người dùng tạo chưa được duyệt hoặc chỉnh sửa trong đợt này. BPMN chuẩn đã bổ sung ngày 15/10/2026; còn cần duyệt nghiệp vụ, chốt mẫu thiết kế với GVHD, nghiệm thu người dùng và đo tải trước tuyên bố hoàn tất toàn bộ M2/M4.
+
+## Các trang quản lý theo mockup
+
+Workspace.jsx dùng khung điều hướng hiện có, bảng có khung chi tiết, tìm kiếm/phân trang và trạng thái tải/lỗi/trống. API workspace.py không đổi schema DB; các lần sửa đối chiếu giá trị cũ bằng UPDATE có điều kiện. Staff đọc, admin mới tạo/sửa khách/đơn; chủ đơn bất biến qua giao diện. Hồ sơ khách mở đúng hội thoại trong Inbox và lọc đơn theo ID khách. Đổi mật khẩu yêu cầu mật khẩu hiện tại, cập nhật có điều kiện và thu hồi AuthSession của chính tài khoản trong transaction. Số liệu tổng hợp dùng hàm SLA hiện có và snapshot ticket kết thúc; xem docs/WORKSPACE.md về kỳ UTC và mẫu số.
+
+## Quyền tra từng đơn trong widget
+
+Migration v6 thêm OrderAccess với một bản ghi hiện tại mỗi đơn. Admin cấp mã sau xác minh ngoài hệ thống, DB chỉ giữ hash và người cấp; nhập mã ràng buộc vào hội thoại có phiên còn hiệu lực bằng UPDATE có điều kiện. Truy vấn quyền nối Order, OrderAccess, Conversation và WidgetSession, đối chiếu chủ đơn/thời hạn/trạng thái. Luồng cấp lại, thu hồi, nhập mã và thực thi tool được tuần tự hóa bởi khóa ghi SQLite; chưa kiểm chứng PostgreSQL. Không cập nhật customer_id của hội thoại và không tự bật lại AI khi handoff. Xem docs/ORDER_ACCESS.md.
+
+## Adapter Telegram
+
+Worker một luồng nằm trong lifespan FastAPI, khởi động sau migration v7 và dừng trước khi đóng vector store. Con trỏ bot và update được commit trước lần getUpdates tiếp theo. Khóa update gồm bot ID/update ID; peer gồm bot ID/chat ID, không ghép khách bằng tên. Không giữ transaction trong lúc gọi model hoặc API Telegram. Tin gửi có nhật ký; sending chưa hoàn tất sau restart chuyển uncertain, cần nhân viên xác nhận retry hoặc skip. AI chưa gửi bị bỏ khi handoff/tin mới/update chưa xử lý; không thể thu hồi request đã lên mạng. SLA Telegram theo sent_at, ghi chú nội bộ không gửi ra kênh. Đây là thiết kế local một worker, chưa có queue phân tán hoặc kết nối thật được nghiệm thu; xem TELEGRAM.md.
